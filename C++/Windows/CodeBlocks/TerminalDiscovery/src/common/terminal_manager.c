@@ -2040,6 +2040,7 @@ void terminal_manager_on_timer(struct terminal_manager *mgr) {
                 if (to_free->tx_kernel_ifindex > 0) {
                     iface_binding_detach(mgr, to_free->tx_kernel_ifindex, to_free);
                 }
+                pending_detach(mgr, to_free);
                 if (track_events) {
                     terminal_snapshot_t remove_snapshot;
                     snapshot_from_entry(entry, &remove_snapshot);
@@ -2571,16 +2572,16 @@ void terminal_manager_log_config(struct terminal_manager *mgr) {
 
     const char *iface_format = cfg_snapshot.vlan_iface_format ? cfg_snapshot.vlan_iface_format : "<default>";
 
-    td_log_writef(TD_LOG_INFO,
-                  "terminal_config",
-                  "keepalive=%us miss=%u holdoff=%us scan=%ums max=%zu vlan_iface_format=%s ignored_vlans=%s",
-                  cfg_snapshot.keepalive_interval_sec,
-                  cfg_snapshot.keepalive_miss_threshold,
-                  cfg_snapshot.iface_invalid_holdoff_sec,
-                  cfg_snapshot.scan_interval_ms,
-                  cfg_snapshot.max_terminals,
-                  iface_format,
-                  ignored_buf);
+    td_log_writef_force(TD_LOG_INFO,
+                        "terminal_config",
+                        "keepalive=%us miss=%u holdoff=%us scan=%ums max=%zu vlan_iface_format=%s ignored_vlans=%s",
+                        cfg_snapshot.keepalive_interval_sec,
+                        cfg_snapshot.keepalive_miss_threshold,
+                        cfg_snapshot.iface_invalid_holdoff_sec,
+                        cfg_snapshot.scan_interval_ms,
+                        cfg_snapshot.max_terminals,
+                        iface_format,
+                        ignored_buf);
 }
 
 void terminal_manager_log_stats(struct terminal_manager *mgr) {
@@ -2592,22 +2593,22 @@ void terminal_manager_log_stats(struct terminal_manager *mgr) {
     memset(&stats, 0, sizeof(stats));
     terminal_manager_get_stats(mgr, &stats);
 
-    td_log_writef(TD_LOG_INFO,
-                  "terminal_stats",
-                  "current=%" PRIu64 " discovered=%" PRIu64 " removed=%" PRIu64
-                  " probes=%" PRIu64 " probe_failures=%" PRIu64
-                  " capacity_drops=%" PRIu64
-                  " events=%" PRIu64 " dispatch_failures=%" PRIu64
-                  " addr_updates=%" PRIu64,
-                  stats.current_terminals,
-                  stats.terminals_discovered,
-                  stats.terminals_removed,
-                  stats.probes_scheduled,
-                  stats.probe_failures,
-                  stats.capacity_drops,
-                  stats.events_dispatched,
-                  stats.event_dispatch_failures,
-                  stats.address_update_events);
+    td_log_writef_force(TD_LOG_INFO,
+                        "terminal_stats",
+                        "current=%" PRIu64 " discovered=%" PRIu64 " removed=%" PRIu64
+                        " probes=%" PRIu64 " probe_failures=%" PRIu64
+                        " capacity_drops=%" PRIu64
+                        " events=%" PRIu64 " dispatch_failures=%" PRIu64
+                        " addr_updates=%" PRIu64,
+                        stats.current_terminals,
+                        stats.terminals_discovered,
+                        stats.terminals_removed,
+                        stats.probes_scheduled,
+                        stats.probe_failures,
+                        stats.capacity_drops,
+                        stats.events_dispatched,
+                        stats.event_dispatch_failures,
+                        stats.address_update_events);
 }
 
 static int td_debug_prepare_context(td_debug_dump_context_t **ctx_ptr,
