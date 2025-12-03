@@ -121,14 +121,6 @@ static void format_ignored_vlan_array(const uint16_t *vlans,
                                       char *buffer,
                                       size_t buffer_len);
 
-static td_log_level_t effective_log_level(td_log_level_t desired_level) {
-    td_log_level_t current = td_log_get_level();
-    if (current == TD_LOG_NONE) {
-        return TD_LOG_NONE;
-    }
-    return current > desired_level ? current : desired_level;
-}
-
 struct terminal_manager *terminal_manager_get_active(void) {
     pthread_mutex_lock(&g_active_manager_mutex);
     struct terminal_manager *mgr = g_active_manager;
@@ -2570,11 +2562,6 @@ void terminal_manager_log_config(struct terminal_manager *mgr) {
     cfg_snapshot = mgr->cfg;
     pthread_mutex_unlock(&mgr->lock);
 
-    td_log_level_t level = effective_log_level(TD_LOG_INFO);
-    if (level == TD_LOG_NONE) {
-        return;
-    }
-
     char ignored_buf[TD_MAX_IGNORED_VLANS * 6 + 8];
     memset(ignored_buf, 0, sizeof(ignored_buf));
     format_ignored_vlan_array(cfg_snapshot.ignored_vlans,
@@ -2584,7 +2571,7 @@ void terminal_manager_log_config(struct terminal_manager *mgr) {
 
     const char *iface_format = cfg_snapshot.vlan_iface_format ? cfg_snapshot.vlan_iface_format : "<default>";
 
-    td_log_writef(level,
+    td_log_writef(TD_LOG_INFO,
                   "terminal_config",
                   "keepalive=%us miss=%u holdoff=%us scan=%ums max=%zu vlan_iface_format=%s ignored_vlans=%s",
                   cfg_snapshot.keepalive_interval_sec,
@@ -2605,12 +2592,7 @@ void terminal_manager_log_stats(struct terminal_manager *mgr) {
     memset(&stats, 0, sizeof(stats));
     terminal_manager_get_stats(mgr, &stats);
 
-    td_log_level_t level = effective_log_level(TD_LOG_INFO);
-    if (level == TD_LOG_NONE) {
-        return;
-    }
-
-    td_log_writef(level,
+    td_log_writef(TD_LOG_INFO,
                   "terminal_stats",
                   "current=%" PRIu64 " discovered=%" PRIu64 " removed=%" PRIu64
                   " probes=%" PRIu64 " probe_failures=%" PRIu64
