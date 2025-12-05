@@ -305,13 +305,9 @@ int main(void) {
     signal(SIGINT, SIG_IGN);
     signal(SIGQUIT, SIG_IGN);
 
-    /* 启动时打印一次关键信息 */
-    printf("mini-shell ready:\n");
-    printf("  PID  = %d\n", getpid());
-    printf("  PGID = %d\n", getpgrp());
-    printf("  SID  = %d\n", getsid(0));
-    printf("  TTY  = %s\n", get_tty_name());
-    printf("\n");
+        /* 启动时打印一次关键信息 */
+        printf("mini-shell ready: PID=%d PGID=%d SID=%d TTY=%s\n\n",
+            getpid(), getpgrp(), getsid(0), get_tty_name());
 
     linenoiseSetCompletionCallback(completion_cb);
     load_history();
