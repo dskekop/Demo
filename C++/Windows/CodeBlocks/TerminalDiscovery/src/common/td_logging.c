@@ -11,10 +11,27 @@
 #define TD_LOG_BUFFER_SIZE 512
 #endif
 
+static void default_sink(void *ctx, td_log_level_t level, const char *component, const char *message);
+
 static pthread_mutex_t g_log_lock = PTHREAD_MUTEX_INITIALIZER;
 static td_log_level_t g_log_level = TD_LOG_INFO;
 static td_log_sink_fn g_log_sink = NULL;
 static void *g_log_sink_ctx = NULL;
+
+static void td_log_vwritef(td_log_level_t level,
+                           const char *component,
+                           const char *fmt,
+                           va_list args) {
+    char buffer[TD_LOG_BUFFER_SIZE];
+    vsnprintf(buffer, sizeof(buffer), fmt, args);
+
+    pthread_mutex_lock(&g_log_lock);
+    td_log_sink_fn sink = g_log_sink ? g_log_sink : default_sink;
+    void *ctx = g_log_sink_ctx;
+    pthread_mutex_unlock(&g_log_lock);
+
+    sink(ctx, level, component, buffer);
+}
 
 static void default_sink(void *ctx, td_log_level_t level, const char *component, const char *message) {
     (void)ctx;
@@ -87,18 +104,17 @@ void td_log_writef(td_log_level_t level, const char *component, const char *fmt,
         return;
     }
 
-    char buffer[TD_LOG_BUFFER_SIZE];
     va_list args;
     va_start(args, fmt);
-    vsnprintf(buffer, sizeof(buffer), fmt, args);
+    td_log_vwritef(level, component, fmt, args);
     va_end(args);
+}
 
-    pthread_mutex_lock(&g_log_lock);
-    td_log_sink_fn sink = g_log_sink ? g_log_sink : default_sink;
-    void *ctx = g_log_sink_ctx;
-    pthread_mutex_unlock(&g_log_lock);
-
-    sink(ctx, level, component, buffer);
+void td_log_writef_force(td_log_level_t level, const char *component, const char *fmt, ...) {
+    va_list args;
+    va_start(args, fmt);
+    td_log_vwritef(level, component, fmt, args);
+    va_end(args);
 }
 
 const char *td_log_level_to_string(td_log_level_t level) {
