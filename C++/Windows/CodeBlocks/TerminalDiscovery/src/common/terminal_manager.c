@@ -2250,8 +2250,8 @@ void terminal_manager_on_timer(struct terminal_manager *mgr) {
                 if (to_free->tx_kernel_ifindex > 0) {
                     iface_binding_detach(mgr, to_free->tx_kernel_ifindex, to_free);
                 }
-                //模拟漏掉pending detach的调用
-                //pending_detach(mgr, to_free);
+
+                pending_detach(mgr, to_free);
                 if (track_events) {
                     terminal_snapshot_t remove_snapshot;
                     snapshot_from_entry(entry, &remove_snapshot);
