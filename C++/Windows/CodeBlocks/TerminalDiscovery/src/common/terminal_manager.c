@@ -103,11 +103,18 @@ struct iface_record {
 struct pending_vlan_entry {
     struct terminal_entry *terminal;
     struct pending_vlan_entry *next;
+#ifdef TD_PENDING_VLAN_DEBUG
+    uint32_t debug_pending_cookie;
+#endif
 };
 
 struct pending_vlan_bucket {
     struct pending_vlan_entry *head;
 };
+
+static bool vlan_id_supported(int vlan_id);
+static struct pending_vlan_bucket *pending_get_bucket(struct terminal_manager *mgr,
+                                                      int vlan_id);
 
 #ifdef TD_PENDING_VLAN_DEBUG
 #define TD_PENDING_COOKIE_ACTIVE  0xfeedac71u
@@ -115,22 +122,22 @@ struct pending_vlan_bucket {
 #define TD_PENDING_COOKIE_FREED   0xdeadc0deu
 #define TD_PENDING_DEBUG_BYTES    64U
 
-static inline void pending_debug_set_cookie(struct terminal_entry *entry, uint32_t value) {
-    if (entry) {
-        entry->debug_pending_cookie = value;
+static inline void pending_debug_set_cookie(struct pending_vlan_entry *node, uint32_t value) {
+    if (node) {
+        node->debug_pending_cookie = value;
     }
 }
 
-static inline void pending_debug_mark_active(struct terminal_entry *entry) {
-    pending_debug_set_cookie(entry, TD_PENDING_COOKIE_ACTIVE);
+static inline void pending_debug_mark_active(struct pending_vlan_entry *node) {
+    pending_debug_set_cookie(node, TD_PENDING_COOKIE_ACTIVE);
 }
 
-static inline void pending_debug_mark_queued(struct terminal_entry *entry) {
-    pending_debug_set_cookie(entry, TD_PENDING_COOKIE_QUEUED);
+static inline void pending_debug_mark_queued(struct pending_vlan_entry *node) {
+    pending_debug_set_cookie(node, TD_PENDING_COOKIE_QUEUED);
 }
 
-static inline void pending_debug_mark_freed(struct terminal_entry *entry) {
-    pending_debug_set_cookie(entry, TD_PENDING_COOKIE_FREED);
+static inline void pending_debug_mark_freed(struct pending_vlan_entry *node) {
+    pending_debug_set_cookie(node, TD_PENDING_COOKIE_FREED);
 }
 
 static void pending_debug_dump_bytes(const void *addr, size_t len) {
@@ -208,7 +215,7 @@ static void pending_debug_on_uaf(const char *ctx,
                         vlan_id,
                         (const void *)node,
                         (const void *)entry,
-                        entry ? entry->debug_pending_cookie : 0U);
+                        node ? node->debug_pending_cookie : 0U);
     td_log_writef_force(TD_LOG_ERROR,
                         "pending_vlan_debug",
                         "entry detail iface=%s ifindex=%d tx_ip=%s meta_vlan=%d pending_vlan=%d failed_probes=%u state=%d",
@@ -220,32 +227,53 @@ static void pending_debug_on_uaf(const char *ctx,
                         failed_probes,
                         entry ? (int)entry->state : -1);
     pending_debug_dump_bytes(entry, TD_PENDING_DEBUG_BYTES);
+    fflush(stderr);
 }
 
 static bool pending_debug_detect_uaf(const char *ctx,
                                      int vlan_id,
                                      const struct pending_vlan_entry *node,
                                      struct terminal_entry *entry) {
-    if (!entry) {
+    if (!node || !entry) {
         return false;
     }
-    if (entry->debug_pending_cookie != TD_PENDING_COOKIE_FREED) {
+    if (node->debug_pending_cookie != TD_PENDING_COOKIE_FREED) {
         return false;
     }
     pending_debug_on_uaf(ctx, vlan_id, node, entry);
     return true;
 }
+
+static void pending_debug_mark_entry_freed(struct terminal_manager *mgr,
+                                           struct terminal_entry *entry) {
+    if (!mgr || !entry) {
+        return;
+    }
+    if (!vlan_id_supported(entry->pending_vlan_id)) {
+        return;
+    }
+    struct pending_vlan_bucket *bucket = pending_get_bucket(mgr, entry->pending_vlan_id);
+    if (!bucket) {
+        return;
+    }
+    for (struct pending_vlan_entry *node = bucket->head; node; node = node->next) {
+        if (node->terminal == entry) {
+            pending_debug_mark_freed(node);
+            break;
+        }
+    }
+}
 #else
-static inline void pending_debug_mark_active(struct terminal_entry *entry) {
-    (void)entry;
+static inline void pending_debug_mark_active(struct pending_vlan_entry *node) {
+    (void)node;
 }
 
-static inline void pending_debug_mark_queued(struct terminal_entry *entry) {
-    (void)entry;
+static inline void pending_debug_mark_queued(struct pending_vlan_entry *node) {
+    (void)node;
 }
 
-static inline void pending_debug_mark_freed(struct terminal_entry *entry) {
-    (void)entry;
+static inline void pending_debug_mark_freed(struct pending_vlan_entry *node) {
+    (void)node;
 }
 
 static inline bool pending_debug_detect_uaf(const char *ctx,
@@ -257,6 +285,12 @@ static inline bool pending_debug_detect_uaf(const char *ctx,
     (void)node;
     (void)entry;
     return false;
+}
+
+static inline void pending_debug_mark_entry_freed(struct terminal_manager *mgr,
+                                                  struct terminal_entry *entry) {
+    (void)mgr;
+    (void)entry;
 }
 #endif /* TD_PENDING_VLAN_DEBUG */
 
@@ -1061,6 +1095,7 @@ static void pending_detach_from_vlan(struct terminal_manager *mgr,
         if ((*cursor)->terminal == entry) {
             struct pending_vlan_entry *node = *cursor;
             *cursor = node->next;
+            pending_debug_mark_active(node);
             free(node);
             break;
         }
@@ -1071,7 +1106,6 @@ static void pending_detach_from_vlan(struct terminal_manager *mgr,
     }
     if (entry->pending_vlan_id == vlan_id) {
         entry->pending_vlan_id = -1;
-        pending_debug_mark_active(entry);
     }
 }
 
@@ -1082,7 +1116,6 @@ static void pending_detach(struct terminal_manager *mgr,
     }
     if (!vlan_id_supported(entry->pending_vlan_id)) {
         entry->pending_vlan_id = -1;
-        pending_debug_mark_active(entry);
         return;
     }
     pending_detach_from_vlan(mgr, entry, entry->pending_vlan_id);
@@ -1103,7 +1136,14 @@ static void pending_attach(struct terminal_manager *mgr,
     if (entry->pending_vlan_id >= 0 && entry->pending_vlan_id != vlan_id) {
         pending_detach(mgr, entry);
     } else if (entry->pending_vlan_id == vlan_id) {
-        pending_debug_mark_queued(entry);
+        struct pending_vlan_entry *node = bucket->head;
+        while (node) {
+            if (node->terminal == entry) {
+                pending_debug_mark_queued(node);
+                break;
+            }
+            node = node->next;
+        }
         return;
     }
 
@@ -1128,7 +1168,7 @@ static void pending_attach(struct terminal_manager *mgr,
     node->next = bucket->head;
     bucket->head = node;
     entry->pending_vlan_id = vlan_id;
-    pending_debug_mark_queued(entry);
+    pending_debug_mark_queued(node);
 }
 
 static bool parse_vlan_from_ifname(const char *format,
@@ -1174,9 +1214,8 @@ static void pending_retry_vlan(struct terminal_manager *mgr,
          *  +16 last_seen           (struct timespec, 16 bytes)
          *  +32 last_probe          (struct timespec, 16 bytes)
          *  +48 failed_probes       (uint32_t)
-         *  +52 debug_pending_cookie(uint32_t)
-         * Keeping this map here helps correlate corruption between state and
-         * failed_probes when pending VLAN UAF fires.
+         * Pending cookies now live on struct pending_vlan_entry so we can
+         * correlate dangling nodes even if the entry storage is reused.
          */
         pending_debug_detect_uaf("pending_retry_vlan", vlan_id, node, entry);
     #endif
@@ -1476,7 +1515,6 @@ static struct terminal_entry *create_entry(const struct terminal_key *key,
     entry->mac_verify_enqueued = false;
     entry->vid_lookup_attempted = false;
     entry->next = NULL;
-    pending_debug_mark_active(entry);
 
     if (packet) {
         apply_packet_binding(mgr, entry, packet);
@@ -1654,7 +1692,7 @@ void terminal_manager_destroy(struct terminal_manager *mgr) {
         struct terminal_entry *node = mgr->table[i];
         while (node) {
             struct terminal_entry *next = node->next;
-            pending_debug_mark_freed(node);
+            pending_debug_mark_entry_freed(mgr, node);
             free(node);
             node = next;
         }
@@ -2229,7 +2267,7 @@ void terminal_manager_on_timer(struct terminal_manager *mgr) {
                 if (removed_due_to_probe_failure) {
                     mgr->stats.probe_failures += 1;
                 }
-                pending_debug_mark_freed(to_free);
+                pending_debug_mark_entry_freed(mgr, to_free);
                 free(to_free);
             } else {
                 if (have_before_snapshot) {
