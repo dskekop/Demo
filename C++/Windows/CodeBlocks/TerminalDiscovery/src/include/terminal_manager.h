@@ -14,6 +14,10 @@
 #define TD_MAX_IGNORED_VLANS 32U
 #endif
 
+#ifndef TD_PENDING_VLAN_DEBUG
+#define TD_PENDING_VLAN_DEBUG 1
+#endif
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -50,6 +54,9 @@ struct terminal_entry {
     bool mac_refresh_enqueued;
     bool mac_verify_enqueued;
     bool vid_lookup_attempted;
+#ifdef TD_PENDING_VLAN_DEBUG
+    uint32_t debug_pending_cookie;
+#endif
     struct terminal_entry *next;
 };
 
