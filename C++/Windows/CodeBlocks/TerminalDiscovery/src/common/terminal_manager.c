@@ -4,6 +4,7 @@
 
 #include <arpa/inet.h>
 #include <errno.h>
+#include <ctype.h>
 #include <inttypes.h>
 #include <net/if.h>
 #include <netinet/if_ether.h>
@@ -102,11 +103,196 @@ struct iface_record {
 struct pending_vlan_entry {
     struct terminal_entry *terminal;
     struct pending_vlan_entry *next;
+#ifdef TD_PENDING_VLAN_DEBUG
+    uint32_t debug_pending_cookie;
+#endif
 };
 
 struct pending_vlan_bucket {
     struct pending_vlan_entry *head;
 };
+
+static bool vlan_id_supported(int vlan_id);
+static struct pending_vlan_bucket *pending_get_bucket(struct terminal_manager *mgr,
+                                                      int vlan_id);
+
+#ifdef TD_PENDING_VLAN_DEBUG
+#define TD_PENDING_COOKIE_ACTIVE  0xfeedac71u
+#define TD_PENDING_COOKIE_QUEUED  0xfeedbee0u
+#define TD_PENDING_COOKIE_FREED   0xdeadc0deu
+#define TD_PENDING_DEBUG_BYTES    64U
+
+static inline void pending_debug_set_cookie(struct pending_vlan_entry *node, uint32_t value) {
+    if (node) {
+        node->debug_pending_cookie = value;
+    }
+}
+
+static inline void pending_debug_mark_active(struct pending_vlan_entry *node) {
+    pending_debug_set_cookie(node, TD_PENDING_COOKIE_ACTIVE);
+}
+
+static inline void pending_debug_mark_queued(struct pending_vlan_entry *node) {
+    pending_debug_set_cookie(node, TD_PENDING_COOKIE_QUEUED);
+}
+
+static inline void pending_debug_mark_freed(struct pending_vlan_entry *node) {
+    pending_debug_set_cookie(node, TD_PENDING_COOKIE_FREED);
+}
+
+static void pending_debug_dump_bytes(const void *addr, size_t len) {
+    if (!addr || len == 0) {
+        return;
+    }
+
+    const unsigned char *data = (const unsigned char *)addr;
+    size_t offset = 0;
+    while (offset < len) {
+        size_t chunk = len - offset;
+        if (chunk > 16U) {
+            chunk = 16U;
+        }
+
+        char hex[16 * 3 + 1];
+        char ascii[16 + 1];
+        size_t hex_pos = 0;
+        for (size_t i = 0; i < chunk; ++i) {
+            unsigned char byte = data[offset + i];
+            if (hex_pos + 3 < sizeof(hex)) {
+                hex_pos += (size_t)snprintf(hex + hex_pos,
+                                            sizeof(hex) - hex_pos,
+                                            "%02x ",
+                                            byte);
+            }
+            ascii[i] = isprint(byte) ? (char)byte : '.';
+        }
+        if (hex_pos > 0 && hex_pos <= sizeof(hex)) {
+            hex[hex_pos - 1] = '\0';
+        } else {
+            hex[0] = '\0';
+        }
+        ascii[chunk] = '\0';
+
+        td_log_writef_force(TD_LOG_ERROR,
+                    "pending_vlan_debug",
+                    "mem[%p] offset=%zu len=%zu hex=%s ascii=%s",
+                    (const void *)(data + offset),
+                    offset,
+                    chunk,
+                    hex,
+                    ascii);
+        offset += chunk;
+    }
+}
+
+static void pending_debug_on_uaf(const char *ctx,
+                                 int vlan_id,
+                                 const struct pending_vlan_entry *node,
+                                 const struct terminal_entry *entry) {
+    char ip_buf[INET_ADDRSTRLEN];
+    const char *iface = "<null>";
+    int tx_ifindex = -1;
+    int meta_vlan = -1;
+    int pending_vlan = -1;
+    uint32_t failed_probes = 0U;
+
+    if (entry) {
+        iface = entry->tx_iface[0] ? entry->tx_iface : "<unresolved>";
+        tx_ifindex = entry->tx_kernel_ifindex;
+        meta_vlan = entry->meta.vlan_id;
+        pending_vlan = entry->pending_vlan_id;
+        failed_probes = entry->failed_probes;
+    }
+
+    if (!entry || !inet_ntop(AF_INET, &entry->tx_source_ip, ip_buf, sizeof(ip_buf))) {
+        snprintf(ip_buf, sizeof(ip_buf), "<invalid>");
+    }
+
+    td_log_writef_force(TD_LOG_ERROR,
+                        "pending_vlan_debug",
+                        "pending VLAN UAF ctx=%s vlan=%d node=%p entry=%p cookie=0x%08x",
+                        ctx ? ctx : "pending",
+                        vlan_id,
+                        (const void *)node,
+                        (const void *)entry,
+                        node ? node->debug_pending_cookie : 0U);
+    td_log_writef_force(TD_LOG_ERROR,
+                        "pending_vlan_debug",
+                        "entry detail iface=%s ifindex=%d tx_ip=%s meta_vlan=%d pending_vlan=%d failed_probes=%u state=%d",
+                        iface,
+                        tx_ifindex,
+                        ip_buf,
+                        meta_vlan,
+                        pending_vlan,
+                        failed_probes,
+                        entry ? (int)entry->state : -1);
+    pending_debug_dump_bytes(entry, TD_PENDING_DEBUG_BYTES);
+    fflush(stderr);
+}
+
+static bool pending_debug_detect_uaf(const char *ctx,
+                                     int vlan_id,
+                                     const struct pending_vlan_entry *node,
+                                     struct terminal_entry *entry) {
+    if (!node || !entry) {
+        return false;
+    }
+    if (node->debug_pending_cookie != TD_PENDING_COOKIE_FREED) {
+        return false;
+    }
+    pending_debug_on_uaf(ctx, vlan_id, node, entry);
+    return true;
+}
+
+static void pending_debug_mark_entry_freed(struct terminal_manager *mgr,
+                                           struct terminal_entry *entry) {
+    if (!mgr || !entry) {
+        return;
+    }
+    if (!vlan_id_supported(entry->pending_vlan_id)) {
+        return;
+    }
+    struct pending_vlan_bucket *bucket = pending_get_bucket(mgr, entry->pending_vlan_id);
+    if (!bucket) {
+        return;
+    }
+    for (struct pending_vlan_entry *node = bucket->head; node; node = node->next) {
+        if (node->terminal == entry) {
+            pending_debug_mark_freed(node);
+            break;
+        }
+    }
+}
+#else
+static inline void pending_debug_mark_active(struct pending_vlan_entry *node) {
+    (void)node;
+}
+
+static inline void pending_debug_mark_queued(struct pending_vlan_entry *node) {
+    (void)node;
+}
+
+static inline void pending_debug_mark_freed(struct pending_vlan_entry *node) {
+    (void)node;
+}
+
+static inline bool pending_debug_detect_uaf(const char *ctx,
+                                            int vlan_id,
+                                            const struct pending_vlan_entry *node,
+                                            struct terminal_entry *entry) {
+    (void)ctx;
+    (void)vlan_id;
+    (void)node;
+    (void)entry;
+    return false;
+}
+
+static inline void pending_debug_mark_entry_freed(struct terminal_manager *mgr,
+                                                  struct terminal_entry *entry) {
+    (void)mgr;
+    (void)entry;
+}
+#endif /* TD_PENDING_VLAN_DEBUG */
 
 static pthread_mutex_t g_active_manager_mutex = PTHREAD_MUTEX_INITIALIZER;
 static struct terminal_manager *g_active_manager = NULL;
@@ -909,6 +1095,7 @@ static void pending_detach_from_vlan(struct terminal_manager *mgr,
         if ((*cursor)->terminal == entry) {
             struct pending_vlan_entry *node = *cursor;
             *cursor = node->next;
+            pending_debug_mark_active(node);
             free(node);
             break;
         }
@@ -949,6 +1136,14 @@ static void pending_attach(struct terminal_manager *mgr,
     if (entry->pending_vlan_id >= 0 && entry->pending_vlan_id != vlan_id) {
         pending_detach(mgr, entry);
     } else if (entry->pending_vlan_id == vlan_id) {
+        struct pending_vlan_entry *node = bucket->head;
+        while (node) {
+            if (node->terminal == entry) {
+                pending_debug_mark_queued(node);
+                break;
+            }
+            node = node->next;
+        }
         return;
     }
 
@@ -973,6 +1168,7 @@ static void pending_attach(struct terminal_manager *mgr,
     node->next = bucket->head;
     bucket->head = node;
     entry->pending_vlan_id = vlan_id;
+    pending_debug_mark_queued(node);
 }
 
 static bool parse_vlan_from_ifname(const char *format,
@@ -1010,6 +1206,19 @@ static void pending_retry_vlan(struct terminal_manager *mgr,
 
         bool resolved = resolve_tx_interface(mgr, entry);
         if (resolved && is_iface_available(entry)) {
+    #ifdef TD_PENDING_VLAN_DEBUG
+        /*
+         * struct terminal_entry (leading bytes)
+         *  +00 key.mac/ip          (struct terminal_key, 12 bytes)
+         *  +12 state               (terminal_state_t)
+         *  +16 last_seen           (struct timespec, 16 bytes)
+         *  +32 last_probe          (struct timespec, 16 bytes)
+         *  +48 failed_probes       (uint32_t)
+         * Pending cookies now live on struct pending_vlan_entry so we can
+         * correlate dangling nodes even if the entry storage is reused.
+         */
+        pending_debug_detect_uaf("pending_retry_vlan", vlan_id, node, entry);
+    #endif
             set_state(entry, TERMINAL_STATE_PROBING);
             entry->failed_probes = 0;
         }
@@ -1483,6 +1692,7 @@ void terminal_manager_destroy(struct terminal_manager *mgr) {
         struct terminal_entry *node = mgr->table[i];
         while (node) {
             struct terminal_entry *next = node->next;
+            pending_debug_mark_entry_freed(mgr, node);
             free(node);
             node = next;
         }
@@ -2040,6 +2250,7 @@ void terminal_manager_on_timer(struct terminal_manager *mgr) {
                 if (to_free->tx_kernel_ifindex > 0) {
                     iface_binding_detach(mgr, to_free->tx_kernel_ifindex, to_free);
                 }
+
                 pending_detach(mgr, to_free);
                 if (track_events) {
                     terminal_snapshot_t remove_snapshot;
@@ -2056,6 +2267,7 @@ void terminal_manager_on_timer(struct terminal_manager *mgr) {
                 if (removed_due_to_probe_failure) {
                     mgr->stats.probe_failures += 1;
                 }
+                pending_debug_mark_entry_freed(mgr, to_free);
                 free(to_free);
             } else {
                 if (have_before_snapshot) {
