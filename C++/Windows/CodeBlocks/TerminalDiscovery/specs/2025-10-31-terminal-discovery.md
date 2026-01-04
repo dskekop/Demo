@@ -162,7 +162,7 @@
    6. 地址表与反向索引的读写均在持有 `terminal_manager.lock` 时进行；外部事件处理（Netlink 回调）进入核心引擎后需先获取此锁，保证与 `resolve_tx_interface`、终端状态机操作不存在竞态。为降低更新阻塞，可在锁内完成结构更新后再脱锁触发终端状态变更/事件队列。
 - **报文路径**：
     1. 适配器仅上报入方向的 ARP 帧及其元数据（MAC、VLAN、入接口、时间戳）给发现引擎；若内核因 RX VLAN offload 剥离 802.1Q 头，必须启用 `PACKET_AUXDATA` 并从 `tpacket_auxdata` 读取原始 VLAN ID；本机发送的 ARP 在适配层即被忽略。
-   2. 引擎归一化 VLAN/接口上下文，更新或创建 `terminal_entry` 状态，并入队变更事件；Realtek 平台默认收包不携带 CPU tag。处理免费 ARP（sender IP 为 0.0.0.0 或缺省）的场景时，以报文中的 target IP 作为终端 IPv4 地址来源，禁止继续记录 0.0.0.0 作为终端地址；sender/target 同时为 0.0.0.0 的异常报文应直接丢弃并写日志。
+   2. 引擎归一化 VLAN/接口上下文，更新或创建 `terminal_entry` 状态，并入队变更事件；Realtek 平台默认收包不携带 CPU tag。处理免费 ARP（sender IP 为 0.0.0.0 或缺省）的场景时，以报文中的 target IP 作为终端 IPv4 地址来源，禁止继续记录 0.0.0.0 作为终端地址；sender/target 同时为 0.0.0.0 的异常报文应直接丢弃并写日志。若检测到源 MAC 非单播（例如刻意构造的组播或广播源 MAC），同样视为异常报文，直接丢弃且记录 WARN，不创建终端条目、事件或统计；原因是以太网规范要求源 MAC 必须为单播，设备通常不会学习组播/广播源地址，继续处理会导致终端表污染、端口漂移误判或被伪造 MAC 消耗容量。
    3. 若收包 VLAN 命中 `ignored_vlans` 列表，则记录 DEBUG 级日志后立即返回，不创建或更新终端条目、统计或 MAC 查表任务。
    4. 若收包 VLAN 在当前地址表中找不到对应 VLANIF（例如尚未创建该 VLAN 的虚接口），仍需保留该终端条目以便后续查询与事件溯源，但状态必须立即标记为 `IFACE_INVALID`，并跳过保活/探测；此时默认没有可用的 `kernel_ifindex` 与 `tx_source_ip`，需保持终端处于待恢复状态。同时输出结构化日志提示“VLAN 无可用虚接口”。当后续创建或恢复该 VLANIF 并补齐 IPv4 后，终端应按照接口管理章节定义的恢复流程自动转入 `PROBING/ACTIVE`，无需重新收包。若之后运维将终端从原 VLAN 端口拔除并接入另一 VLAN 的二层口，引擎需在下一次收到该 MAC 的报文时立即刷新条目的 VLAN/端口元数据：
       - 若新 VLAN 已存在可用 VLANIF，则重新绑定 `tx_source_ip/kernel_ifindex`，将状态推进为 `PROBING` 并触发一次携带新旧 ifindex 的 `MOD` 事件；
