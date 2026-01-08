@@ -40,12 +40,14 @@ done
 
 # Auto-detect DEST if not provided
 if [ -z "$DEST" ]; then
-    if [ -x /bin/dsh ]; then
-        DEST="/bin/dsh"
-    elif command -v dsh >/dev/null 2>&1; then
+    # Prefer PATH lookup (like which/command -v), fallback to common location
+    if command -v dsh >/dev/null 2>&1; then
         DEST="$(command -v dsh)"
-    else
+    elif [ -x /bin/dsh ]; then
         DEST="/bin/dsh"
+    else
+        echo "[ERR] dsh not found in PATH and /bin/dsh missing; specify with -d" >&2
+        exit 1
     fi
 fi
 
