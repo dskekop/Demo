@@ -128,6 +128,11 @@
       - 缓存正在刷新、强制刷新失败或尚未初始化时返回 `TD_ADAPTER_ERR_NOT_READY`，终端管理器据此保持队列等待下一轮版本更新；
       - 缓存可用但未命中目标 MAC/VLAN 时返回 `TD_ADAPTER_ERR_NOT_FOUND`，同时输出 `ifindex=0` 并保留当前版本号，禁止使用 `NOT_READY` 触发重复刷新；
       - 相关语义需在 `realtek_mac_locator_lookup` 与后续桥接实现中保持一致，确保 `mac_need_refresh` 队列不会因错误码混用而无限膨胀。
+- **Netforward 参考代码约束**：
+   - 可参考 `src/ref/netforward` 示例；该平台通过与用户态核心转发进程 hsl 的进程间通信完成报文收发，不再使用 Raw Socket 收包，流程与 Realtek 平台不同。
+   - 报文携带 CPU tag，可直接解析出整机 ifindex，因此无需注册或实现 `td_adapter_mac_locator_ops`；适配器可直接用报文中的 ifindex 驱动事件与状态机。
+   - 平台不存在也不依赖 `libswitchapp.so`，无需引入相关桥接或弱符号桩。
+   - 交叉编译建议使用 `aarch64-none-linux-gnu-` 工具链前缀（如 `aarch64-none-linux-gnu-gcc`），保持与现网 Netforward 平台环境一致；若该工具链暂不可用，可使用通用 ARM64 交叉工具链验证代码可编译性。
 - **北向 API 约束**：
    - 本项目提供 `getAllTerminalInfo` 与 `setIncrementReport` 的 C 导出实现，对外暴露为稳定 ABI；外部团队实现 `IncReportCb` 并承诺在被调用时不阻塞。
     - 需兼容外部团队既定的 C++ 类型定义：
