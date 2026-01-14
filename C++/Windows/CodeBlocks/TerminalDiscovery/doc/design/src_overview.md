@@ -2,7 +2,7 @@
 
 本笔记梳理 `src/` 目录的主要组件、核心数据结构、关键函数和线程模型，便于后续团队成员快速理解与维护终端发现代理。
 
-## 模块分层
+## 模块分层与构建产物
 
 ```
 src/
@@ -33,7 +33,7 @@ src/
    └── ...（供应商参考实现，仅供查阅）
 ```
 
-- `adapter/` 集中适配层实现，当前仅有 `realtek_adapter` 提供真实硬件接入能力。
+- `adapter/` 集中适配层实现，当前仅有 `realtek_adapter` 提供真实硬件接入能力；适配器代码在本仓默认以对象文件直接与应用/测试链接，不再打包为独立静态库，便于后续平台在各自工程内平移和增量替换。
 - `common/` 含业务核心：终端管理器、配置、日志、netlink 与北向桥接实现。
 - `include/` 存放跨目录共享的对外头文件，供适配层与测试复用。
 - `main/` 目前仅有 `terminal_main.c`，既提供 CLI 启动入口，也导出嵌入式接口 `terminal_discovery_initialize` 及只读 accessor（`terminal_discovery_get_manager` / `terminal_discovery_get_app_context`，声明于 `terminal_discovery_embed.h`）。
@@ -41,6 +41,36 @@ src/
 - `tests/` 汇总 C/C++ 单元与集成测试入口，新增 `terminal_embedded_init_tests` 覆盖嵌入式初始化回滚与重复注册场景；`make test` 将直接执行此目录下的目标。
 - `demo/` 保留实验性/演示用程序，不随正式版本发布。
 - `ref/` 仅存放厂商给出的参考代码或头文件，保持只读，用于对照实际实现。
+
+### 构建形式
+
+- 公共跨平台代码（`common/` 目录下的核心 C 文件 + `common/terminal_northbound.cpp` 的北向桥接 + `include/` 下的头文件）产出静态库 `libtd_common.a`，由 `make all`/`make test` 自动生成，也可通过 `make common-lib` 单独构建。
+- 平台适配器（当前为 Realtek）以对象文件直接链接：应用与测试目标从 `adapter/*.o`、`stub/*.o` 取用，不再生成适配器静态库，便于后续平台在自有工程内复用或替换。
+- 典型命令：
+  - `make test`：x86 本地构建并运行所有单元/集成/嵌入初始化测试。
+  - `make cross-generic`：使用通用 MIPS 交叉工具链（`mips-linux-gnu-*`）完成编译验证，确保目录拆分与对象直接链接模式在非 x86 环境可行。
+  - 交叉编译可通过 `CROSS` 或 `TOOLCHAIN_PREFIX` 注入其他前缀（如 Realtek 生产工具链）。
+
+### 平台适配落地指南
+
+1) 物理分离与编译方式
+- 公共跨平台逻辑：仅限 `common/` 与 `include/`（北向桥接具体为 `common/terminal_northbound.cpp` + `include/terminal_discovery_api.hpp`），在宿主或交叉环境先行编译为 `libtd_common.a`，保持与平台无关。不得在此目录引入平台专有头或宏开关。
+- 平台相关逻辑：位于 `adapter/`（及可选的 `stub/`），按目标平台在本地工程中直接编译为对象文件并与应用/守护进程链接；不要求生成独立静态库，便于平台侧按需裁剪、替换或增补特定编译选项。
+- 引入新平台时，新建 `adapter/<platform>.*`，在各自工程的构建脚本中编译并与 `libtd_common.a` 一起链接；运行期不支持动态选择，构建期必须唯一确定适配器。
+
+2) 链接顺序与裁剪
+- 优先链接 `libtd_common.a`，再追加平台适配器对象；如需替换默认 MAC 桥接 stub（`stub/td_switch_mac_stub.o`），在链接命令中将真实 SDK/桥接对象置于 stub 之前或直接移除 stub 对象。
+- 嵌入式或最小化场景可剔除 demo/ref 目录，不影响静态库与适配器编译。
+
+3) 工具链与目标
+- x86 开发验证：`make test`（默认 GCC/Clang）。
+- 通用 MIPS 校验：`make cross-generic`（`mips-linux-gnu-*`）。
+- 生产工具链：通过 `CROSS=<prefix>` 或 `TOOLCHAIN_PREFIX=<prefix>` 注入（例如 `mips-rtl83xx-linux-`），保持与现网 Realtek 环境一致。
+
+4) 适配器移植要点
+- 保持 `adapter_api.h` 契约不变，新增平台如需扩展字段，应在公共头中向后兼容地声明，并在特定平台对象内部实现。
+- 仅适配层可访问平台 SDK/内核特定头文件，公共代码禁止包含平台私有依赖。
+- 运行时参数（接口名、发包节流、VLAN 过滤等）只作用于已编译进二进制的适配器，配置文件/CLI 不提供跨平台切换。
 
 ### 架构视图（模块/组件层）
 
