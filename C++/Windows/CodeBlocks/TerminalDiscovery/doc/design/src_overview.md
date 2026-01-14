@@ -72,6 +72,16 @@ src/
 - 仅适配层可访问平台 SDK/内核特定头文件，公共代码禁止包含平台私有依赖。
 - 运行时参数（接口名、发包节流、VLAN 过滤等）只作用于已编译进二进制的适配器，配置文件/CLI 不提供跨平台切换。
 
+5) 新平台接入清单
+- 在 `adapter/<platform>.c/.h` 定义 `td_adapter_descriptor`，完整实现 `td_adapter_ops` 的 `init/start/stop/shutdown/register_packet_rx/send_arp`，确保报文订阅与发送路径均可用。
+- 若平台支持桥表查询，补齐 `td_adapter_mac_locator_ops`（`lookup`/`subscribe`/`get_version`）；若暂不支持，可先不实现该结构体，必要时仅保留 `stub/td_switch_mac_stub` 作为链接占位。
+- RX 路径需将 VLAN、ifindex、源 MAC/IP 封装为 `td_adapter_packet_view` 再调用订阅回调；TX 路径需按照请求中的 VLAN 与回退接口信息填充并发送 ARP。
+- 在 `adapter_registry.c` 注册新描述符，并在平台侧构建脚本中将新适配器对象与 `libtd_common.a` 一起链接。
+
+6) 无桥表场景的默认行为
+- 若 `td_adapter_mac_locator_ops` 为空，管理器会跳过 MAC 点查与刷新订阅逻辑，保持 `meta.ifindex` 为空，仅依赖报文路径的 VLAN/接口绑定信息驱动状态机；事件仍可由报文触发，但不会产生基于桥表的漂移校验。
+- 可选方案：直接不暴露 `mac_locator_ops`，或在内部返回通用错误码以示不支持；此时可保留或替换 `stub/td_switch_mac_stub` 以满足链接。若想用 stub 提供“假桥表”能力，需要在适配层自行封装 `mac_locator_ops` 并转调 stub；否则 stub 仅作为占位，不会被管理器调用。
+
 ### 架构视图（模块/组件层）
 
 ```mermaid
