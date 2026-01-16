@@ -7,6 +7,8 @@
 
 ## 假设与非目标
 - Realtek 平台具备 Raw Socket 能力并允许在物理口（如 `eth0`）直接封装 802.1Q VLAN tag 发包；若目标环境禁止用户态插入 VLAN tag，再回退到绑定 VLAN 虚接口（如 `vlan1`）。推荐交叉编译前缀为 `mips-rtl83xx-linux-`（如 `mips-rtl83xx-linux-gcc`）；若该工具链暂不可用，可使用通用 MIPS 交叉工具链验证代码可编译性。
+- Netforward 平台报文自带 CPU tag，可直接提供整机 ifindex；无需 MAC 查表，也不依赖 `libswitchapp.so`；收发由 sidecar 进程与平台 hsl 通信后透传给主进程。需在本项目内提供 sidecar 打桩实现以便无 hsl 环境的集成验证。
+- Realtek 平台进程、Netforward 平台进程与 sidecar 进程相互独立运行；跨平台可复用部分仅限静态库形式的公共代码（`libtd_common.a`），各平台适配器以对象方式链接到各自进程，运行期不做动态切换。
 - 终端发现逻辑仅依赖入方向 ARP 报文；适配器需在收包侧过滤掉本机发送的 ARP，避免无意义事件，并在内核剥离 VLAN tag 时通过 `PACKET_AUXDATA` 取回原始 VLAN。
 - 设备启动阶段已默认为所有二层口启用 ARP Copy-to-CPU ACL，适配器无需额外校验或感知该配置。
 - 设备上存在网络测试仪或等效工具，可模拟 ≥300 个终端。
@@ -147,6 +149,14 @@
 2. ✅ 平台适配编译边界：Realtek 适配器/桥接/stub 直接以对象文件复用并与应用链接，不再打包静态库，保持编译期开关与桥接依赖，运行期不做动态选择。
 3. ✅ 构建脚本调整：`src/Makefile` 拆分公共静态库与平台适配对象，应用/测试直接链接适配器对象；嵌入初始化测试继续复用裁剪后的对象，避免与桩实现的符号覆盖冲突。
 4. ✅ 验证策略：x86 `make test` 全量通过；已执行 `make cross-generic`（通用 MIPS 工具链）并成功编译生成 MIPS 产物。
+
+### 阶段 11：Netforward 适配器与 sidecar（待启动）
+1. 适配器实现：新增 `adapter/netforward_adapter.*`，遵循 `adapter_api.h`，直接解析报文 CPU tag/ifindex 与 VLAN，并调用 `register_packet_rx`；不注册/调用 `td_adapter_mac_locator_ops`，保持与 Realtek MAC 表逻辑解耦。
+2. sidecar 打桩：实现最小 sidecar **独立进程** 与 hsl IPC 透传框架，仅做原始报文转发，不解析/修改 CPU tag 或 VLAN；确保 sidecar 与主进程二进制/工具链独立构建。
+3. IPC/运行链路：定义 sidecar→主进程的消息封装（建议 UNIX 域流/UDP 任选其一），约定长度、对齐与多报文承载；主进程 Netforward 适配器负责解封装并解析 VLAN/CPU tag ifindex，再上送 `register_packet_rx`，平台无关核心沿既有回调执行终端学习/状态机。
+4. 构建与隔离：在 `src/Makefile` 增加独立 `netforward` 主进程目标与 sidecar 目标，默认交叉前缀 `aarch64-none-linux-gnu-`，并提供 `-generic` ARM64 交叉验证目标；构建任一目标不依赖其他平台工具链或适配器对象，禁止单二进制条件编译多平台适配器。
+5. 测试与验收：补充单元/集成测试覆盖 sidecar 桩链路、CPU tag ifindex 直通、MAC 表路径禁用；在 x86 桩环境验证增量/全量事件无回归，预留 CI 任务占位。
+6. 文档交付：新增 Netforward/sidecar 设计说明与 IPC 序列/报文格式，更新构建使用说明，强调平台独立编译与运行时不切换适配器。
 
 
 ## 依赖与风险
