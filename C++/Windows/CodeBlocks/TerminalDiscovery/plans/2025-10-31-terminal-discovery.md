@@ -145,19 +145,12 @@
 6. ✅ 文档同步：已更新规范与设计文档引用（demo 指南、适配器说明、调试手册），标注点查接口调用顺序与回退路径，并说明点查不返回版本号时由管理器写回当前版本的处理方式。
 
 ### 阶段 10：构建与目录拆分（进行中）
-1. ✅ 公共代码静态库化：新增 `libtd_common.a` 汇总 `common/` 与北向 C++ 代码，`make all/test` 默认链接，可单独 `make common-lib` 构建，交叉编译仍由 `CROSS/TOOLCHAIN_PREFIX` 驱动。
-2. ✅ 平台适配编译边界：Realtek 适配器/桥接/stub 直接以对象文件复用并与应用链接，不再打包静态库，保持编译期开关与桥接依赖，运行期不做动态选择。
-3. ✅ 构建脚本调整：`src/Makefile` 拆分公共静态库与平台适配对象，应用/测试直接链接适配器对象；嵌入初始化测试继续复用裁剪后的对象，避免与桩实现的符号覆盖冲突。
-4. ✅ 验证策略：x86 `make test` 全量通过；已执行 `make cross-generic`（通用 MIPS 工具链）并成功编译生成 MIPS 产物。
-
-### 阶段 11：Netforward 适配器与 sidecar（待启动）
-1. 适配器实现：新增 `adapter/netforward_adapter.*`，遵循 `adapter_api.h`，直接解析报文 CPU tag/ifindex 与 VLAN，并调用 `register_packet_rx`；不注册/调用 `td_adapter_mac_locator_ops`，保持与 Realtek MAC 表逻辑解耦。
-2. sidecar 打桩：实现最小 sidecar **独立进程** 与 hsl IPC 透传框架，仅做原始报文转发，不解析/修改 CPU tag 或 VLAN；确保 sidecar 与主进程二进制/工具链独立构建。
-3. IPC/运行链路：定义 sidecar→主进程的消息封装（建议 UNIX 域流/UDP 任选其一），约定长度、对齐与多报文承载；主进程 Netforward 适配器负责解封装并解析 VLAN/CPU tag ifindex，再上送 `register_packet_rx`，平台无关核心沿既有回调执行终端学习/状态机。
-4. 构建与隔离：在 `src/Makefile` 增加独立 `netforward` 主进程目标与 sidecar 目标，默认交叉前缀 `aarch64-none-linux-gnu-`，并提供 `-generic` ARM64 交叉验证目标；构建任一目标不依赖其他平台工具链或适配器对象，禁止单二进制条件编译多平台适配器。
-5. 测试与验收：补充单元/集成测试覆盖 sidecar 桩链路、CPU tag ifindex 直通、MAC 表路径禁用；在 x86 桩环境验证增量/全量事件无回归，预留 CI 任务占位。
-6. 文档交付：新增 Netforward/sidecar 设计说明与 IPC 序列/报文格式，更新构建使用说明，强调平台独立编译与运行时不切换适配器。
-
+1. ⏳ 按平台拆分构建入口：为每个平台提供独立 makefile，负责主进程/平台特定代码 与公共静态库的生成/清理（不单独暴露“仅编库”目标），并将对象文件与产物落在平台私有输出目录，避免命名冲突。
+2. ⏳ 测试矩阵梳理：标定平台无关测试为“各平台必编必跑”，平台相关测试仅在对应平台 makefile 中构建/执行，同时保持输出目录隔离，确保流水线可并行。
+3. ⏳ cross-generic 支撑：各平台 makefile 增设 `cross-generic` 目标，使用通用交叉工具链（如 `mips-linux-gnu-` 前缀）完成一次编译验证并记录结果，作为嵌入式可行性基线。
+4. ✅ 公共代码静态库化：`libtd_common.a` 汇总 `common/` 与北向 C++ 代码，默认随平台构建产生并在各平台 makefile 内负责清理。
+5. ✅ 平台适配编译边界：各平台适配器/桥接/stub(sidecar除外) 以对象文件复用并与应用链接，不再打包静态库，运行期不做动态选择。
+6. ⏳ 构建脚本回归：在拆分后回归 x86 `make test`，并在各平台流水线新增“平台无关测试”与“平台特定测试”两个步骤，完成一次 `cross-generic` 编译验证。
 
 ## 依赖与风险
 - 依赖网络测试仪能稳定模拟大规模 ARP 终端。

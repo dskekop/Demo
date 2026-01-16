@@ -14,12 +14,17 @@
 - 提供可嵌入外部守护进程的初始化入口，满足多平台统一集成和生命周期托管。
 
 ## 交付与运行模式
-- 公共逻辑（如 `common/`、`include/`）以静态库交付，当前产物为 `libtd_common.a`，各平台在自身工程内直接编译、链接，不依赖运行时装载可选组件；Realtek 平台进程、Netforward 平台进程与 sidecar 进程均独立运行，仅复用该静态库的跨平台部分。
-- 平台特定适配器（Realtek、Netforward、Linux raw socket 等）在各平台工程内单独编译并随各自主进程/固件发布，运行时只携带本平台对应的适配器，不做动态切换或并行装载；适配器编译产物以对象文件形式直接与各自主进程链接，而非独立静态库，便于后续平台在自身工程内平移或增量替换。
-- 构建隔离：每个平台保持独立的编译入口/目标（含 sidecar），仅依赖 `libtd_common.a` 与公共头文件；构建任一平台时不检查、不引入其他平台的工具链或适配器对象，禁止在同一二进制中条件编译多个平台适配器，避免交叉耦合与不必要的编译感知。
-- 运行时配置仅用于覆盖当前已编译进进程的适配器参数（接口名、发包节流、VLAN 过滤等），不再允许通过配置选择或启用其他平台的适配器，避免因依赖缺失导致的编译/链接失败。
-- `src/` 目录保持平台相关与平台无关的物理分离：公共跨平台代码集中在 `common/`、`include/` 等目录，编译为可复用的静态库；平台相关代码（例如 `adapter/realtek` 等）由各平台以对象文件在本地工程内编译、链接，与静态库解耦，便于增量集成新平台。
-- 由于 Realtek 平台已先行落地，分拆平台相关/无关代码时需保证 Realtek 适配器迁移成本可控：保留现有编译选项与桥接依赖的可用性，优先完成静态库与 Realtek 适配层的编译链打通，再逐步推广到其他平台，避免一次性拆分导致 Realtek 现网编译或集成阻断。
+- 公共逻辑（`common/`、`include/`）以 `libtd_common.a` 交付，平台主进程仅链接该跨平台静态库；Realtek/Netforward 主进程彼此独立运行。sidecar 位于 `stub/`，为独立进程且不依赖该静态库。
+- 平台适配器（Realtek、Netforward、Linux raw socket 等）在各自工程内单独编译成对象文件并与宿主进程/固件链接发布，运行时仅携带本平台适配器，不做动态切换或并行装载。
+- 构建隔离：各平台保持独立编译入口/目标（含 sidecar），只依赖 `libtd_common.a` 与公共头；构建任一平台不检查其他平台的工具链或适配器对象，禁止单二进制条件编译多适配器。
+- 运行时配置仅覆盖当前已编译进进程的适配器参数（接口名、发包节流、VLAN 过滤等），无法通过配置启用其他平台适配器。
+- `src/` 目录物理分离平台无关/有关代码：公共代码编译成静态库，平台代码在各自工程内编译并与静态库解耦，便于增量集成新平台。
+- Realtek 先行落地：优先打通静态库与 Realtek 适配层的编译链，保持现有编译选项与桥接依赖可用，再渐进推广到其他平台，避免一次性拆分阻断现网集成。
+ - 构建与测试布局：
+    - 每个平台拥有独立的 makefile 入口，负责本平台主进程与 sidecar 的编译、静态库的生成/清理（不单独暴露“仅编库”目标），并将对象文件与产物存放在平台私有的输出目录，确保命名可统一而不冲突。
+    - 公共静态库仍为 `libtd_common.a`，由各平台 makefile 复用并在各自流程内生成/清理。
+    - 测试程序按平台无关性划分：平台无关测试需在所有平台 makefile 中构建；平台相关测试仅在对应平台 makefile 中构建与执行。
+    - 各平台 makefile 需支持 `cross-generic` 目标，使用通用交叉工具链（如 `mips-linux-gnu-` 前缀）完成编译，以验证嵌入式环境的可行性。
 
 ## 非目标
 - 本阶段不实现完整的 DHCP/ND 嗅探能力。
@@ -135,7 +140,23 @@
    - 平台不存在也不依赖 `libswitchapp.so`，无需引入相关桥接或弱符号桩。
    - 由于与 hsl 进程间通信收发包需要引入平台相关的进程框架，为避免对集成本项目的进程造成耦合和污染，参考 cloud-native sidecar 模式为集成本项目的进程提供一个 sidecar 进程：sidecar 负责引入平台相关的进程框架并完成与 hsl 的通信，然后将报文透传到集成本项目的进程。
    - 本项目需提供 sidecar 进程的打桩实现：sidecar 透传的报文经过平台相关代码解析后，最终调用 `register_packet_rx` 注册的平台无关报文处理回调，由主进程复用现有收包逻辑；便于在无真实 hsl 环境时验证集成链路。
-   - sidecar 收到的报文格式可参考 `src/ref/netforward` 示例；sidecar 本身只做透传，不处理或修改报文。平台特定代码负责对透传报文做初步解析，转换为 `register_packet_rx` 回调可消费的通用格式，尤其要正确整理 VLAN 与整机 ifindex 信息再上送给平台无关层。
+    - sidecar 与 hsl 之间的 IPC 报文格式已确定：使用 `struct sockaddr_vlan` 作为地址头，后续紧跟完整的以太网帧（从目的/源 MAC 开始的二层报文）。字段定义：
+
+```
+struct sockaddr_vlan {
+      unsigned char dest_mac[HSL_ETHER_ALEN];
+      unsigned char src_mac[HSL_ETHER_ALEN];
+      unsigned int port;        /* Outgoing/Incoming interface index */
+      unsigned short vlanid;    /* Vlan id */
+      unsigned short svlanid;   /* SVlan id */
+      unsigned int length;      /* Length of the Packet */
+      unsigned short eth_type;  /* Ethernet type */
+};
+
+#define HSL_ETHER_ALEN 6
+```
+
+       sidecar 本身只做透传，不处理或修改报文。平台特定代码负责对透传报文做初步解析，转换为 `register_packet_rx` 回调可消费的通用格式，尤其要正确整理 VLAN 与整机 ifindex 信息再上送给平台无关层。
    - 运行逻辑总结：sidecar 打桩进程模拟与 hsl 的 IPC 并原样透传报文；Netforward 平台特定适配器接收并解析该报文（含 VLAN/CPU tag ifindex）；平台无关核心通过已注册的 `register_packet_rx` 回调继续执行终端学习与状态机处理。
    - 交叉编译建议使用 `aarch64-none-linux-gnu-` 工具链前缀（如 `aarch64-none-linux-gnu-gcc`），保持与现网 Netforward 平台环境一致；若该工具链暂不可用，可使用通用 ARM64 交叉工具链验证代码可编译性。
 - **北向 API 约束**：
