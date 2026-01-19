@@ -8,7 +8,9 @@
 
 #include "td_logging.h"
 
+#ifndef TD_DEFAULT_ADAPTER
 #define TD_DEFAULT_ADAPTER "realtek"
+#endif
 #define TD_DEFAULT_RX_IFACE "eth0"
 #define TD_DEFAULT_TX_IFACE "eth0"
 #define TD_DEFAULT_TX_INTERVAL_MS 100U

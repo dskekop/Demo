@@ -14,17 +14,20 @@
 - 提供可嵌入外部守护进程的初始化入口，满足多平台统一集成和生命周期托管。
 
 ## 交付与运行模式
-- 公共逻辑（`common/`、`include/`）以 `libtd_common.a` 交付，平台主进程仅链接该跨平台静态库；Realtek/Netforward 主进程彼此独立运行。sidecar 位于 `stub/`，为独立进程且不依赖该静态库。
+- 公共逻辑（`common/`、`include/`）以 `libtd_common.a` 交付，平台主进程仅链接该跨平台静态库；Realtek/Netforward 主进程彼此独立运行。sidecar 仅在 Netforward 平台存在，位于 `stub/`，为独立进程且不依赖该静态库；其他平台（含 Realtek/Linux raw socket 等）不引入 sidecar。
 - 平台适配器（Realtek、Netforward、Linux raw socket 等）在各自工程内单独编译成对象文件并与宿主进程/固件链接发布，运行时仅携带本平台适配器，不做动态切换或并行装载。
 - 构建隔离：各平台保持独立编译入口/目标（含 sidecar），只依赖 `libtd_common.a` 与公共头；构建任一平台不检查其他平台的工具链或适配器对象，禁止单二进制条件编译多适配器。
 - 运行时配置仅覆盖当前已编译进进程的适配器参数（接口名、发包节流、VLAN 过滤等），无法通过配置启用其他平台适配器。
 - `src/` 目录物理分离平台无关/有关代码：公共代码编译成静态库，平台代码在各自工程内编译并与静态库解耦，便于增量集成新平台。
 - Realtek 先行落地：优先打通静态库与 Realtek 适配层的编译链，保持现有编译选项与桥接依赖可用，再渐进推广到其他平台，避免一次性拆分阻断现网集成。
  - 构建与测试布局：
-    - 每个平台拥有独立的 makefile 入口，负责本平台主进程与 sidecar 的编译、静态库的生成/清理（不单独暴露“仅编库”目标），并将对象文件与产物存放在平台私有的输出目录，确保命名可统一而不冲突。
-    - 公共静态库仍为 `libtd_common.a`，由各平台 makefile 复用并在各自流程内生成/清理。
+   - 顶层 Makefile 仅作分发器，提供 `make realtek`、`make netforward`、`make linux` 等对等命名的入口跳转至对应子目录，不再用单一 Makefile 携带全部平台规则；各平台目标命名需对等、对齐，避免出现默认/主平台的特殊命名（如 `all` 只代表某一平台）。
+    - 每个平台拥有独立的 makefile 入口，负责本平台主进程与（仅 Netforward）sidecar 的编译、静态库的生成/清理（不单独暴露“仅编库”目标），并将对象文件与产物存放在平台私有输出目录（如 `out/<platform>/`），避免同名目标冲突。
+    - 公共静态库仍为 `libtd_common.a`，由各平台 makefile 复用并在各自流程内生成/清理；平台适配器/sidecar 源文件以“白名单”方式写入各自 makefile，禁止跨平台引用。
+    - Realtek 专属实现（除适配器外）仅在 Realtek 平台构建：`stub/td_switch_mac_stub.c`（覆盖 Realtek MAC 桥接弱符号）、`demo/td_switch_mac_demo.c`（桥接示例）、`src/ref/realtek/*`（仅作参考）与其他依赖 Realtek SDK/桥接头文件的源文件不得在 Netforward/Linux raw socket 等平台的构建入口中被包含，避免因缺失 SDK 依赖导致编译失败；非 Realtek 平台仅链接 `libtd_common.a` 与各自的适配器/sidecar 对象。
+    - Netforward 平台在 makefile 中提供 sidecar 专用目标（如 `sidecar`、`sidecar-stub`），主进程与 sidecar 分别产出独立二进制，允许通过变量切换真实 IPC 对象或 stub。
     - 测试程序按平台无关性划分：平台无关测试需在所有平台 makefile 中构建；平台相关测试仅在对应平台 makefile 中构建与执行。
-    - 各平台 makefile 需支持 `cross-generic` 目标，使用通用交叉工具链（如 `mips-linux-gnu-` 前缀）完成编译，以验证嵌入式环境的可行性。
+      - 各平台 makefile 需支持 `CROSS_PREFIX`/`cross-generic` 目标，使用通用交叉工具链（如 `mips-linux-gnu-`、`aarch64-linux-gnu-` 前缀）完成编译，以验证嵌入式环境的可行性并保持与现网平台一致；`cross` 目标仅供厂商特定工具链（如 `mips-rtl83xx-linux-`）存在时选择性使用，默认交叉验证依赖 `cross-generic`，不得将厂商专有工具链设为必备。
 
 ## 非目标
 - 本阶段不实现完整的 DHCP/ND 嗅探能力。
