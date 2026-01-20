@@ -139,10 +139,11 @@
       - 相关语义需在 `realtek_mac_locator_lookup` 与后续桥接实现中保持一致，确保 `mac_need_refresh` 队列不会因错误码混用而无限膨胀。
 - **Netforward 参考代码约束**：
    - 可参考 `src/ref/netforward` 示例；该平台通过与用户态核心转发进程 hsl 的进程间通信完成报文收发，不再使用 Raw Socket 收包，流程与 Realtek 平台不同。上述示例仅供理解 Netforward 平台工作流程，不作为本项目代码编写的直接指导。
-   - 报文携带 CPU tag，可直接解析出整机 ifindex，因此无需注册或实现 `td_adapter_mac_locator_ops`；适配器可直接用报文中的 ifindex 驱动事件与状态机。
+   - 报文携带 CPU tag，可直接解析出整机 ifindex（物理口标识，非内核 VLAN 接口的 `kernel_ifindex`），因此无需注册或实现 `td_adapter_mac_locator_ops`；事件/状态机使用该整机 ifindex 表示入向物理口，整机 ifindex 直接取自 IPC 报文 `port` 字段。
    - 平台不存在也不依赖 `libswitchapp.so`，无需引入相关桥接或弱符号桩。
-   - 由于与 hsl 进程间通信收发包需要引入平台相关的进程框架，为避免对集成本项目的进程造成耦合和污染，参考 cloud-native sidecar 模式为集成本项目的进程提供一个 sidecar 进程：sidecar 负责引入平台相关的进程框架并完成与 hsl 的通信，然后将报文透传到集成本项目的进程。
-   - 本项目需提供 sidecar 进程的打桩实现：sidecar 透传的报文经过平台相关代码解析后，最终调用 `register_packet_rx` 注册的平台无关报文处理回调，由主进程复用现有收包逻辑；便于在无真实 hsl 环境时验证集成链路。
+   - 上行报文不在物理口插入 VLAN tag，而是直接通过对应 VLAN 虚接口发送（平台常见命名前缀为 `Vlan`，例如 `Vlan1`，与 Realtek 的 `vlan` 前缀不同）；默认不存在可作为“全局”收发口的 `eth0`。VLAN 归属从报文中携带的 `vlanid` 字段直接获取（暂不考虑 802.1ad），发送时依据 `vlanid` 选择/解析 VLANIF 的 `kernel_ifindex`，而入向物理口仍以 CPU tag 提供的整机 ifindex 记录，两者语义独立，不可混用。
+   - 由于与 hsl 进程间通信收包需要引入平台相关的进程框架，为避免对集成本项目的进程造成耦合和污染，参考 cloud-native sidecar 模式为集成本项目的进程提供一个 sidecar 进程：sidecar 负责引入平台相关的进程框架并完成与 hsl 的通信，然后将报文透传到集成本项目的进程；**上行发包不走进程间通信**，由主进程直接在对应 VLAN 虚接口上发送。
+   - 本项目需提供 sidecar 进程的打桩实现：sidecar 透传的报文经过平台相关代码解析后，最终调用 `register_packet_rx` 注册的平台无关报文处理回调，由主进程复用现有收包逻辑；便于在无真实 hsl 环境时验证集成链路。主进程发包路径不依赖 sidecar/IPC，直接使用 `VlanX` 等 VLAN 虚接口完成发送。
     - sidecar 与 hsl 之间的 IPC 报文格式已确定：使用 `struct sockaddr_vlan` 作为地址头，后续紧跟完整的以太网帧（从目的/源 MAC 开始的二层报文）。字段定义：
 
 ```

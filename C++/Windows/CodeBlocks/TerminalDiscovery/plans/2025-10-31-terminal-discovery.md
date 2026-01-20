@@ -153,6 +153,22 @@
 6. ✅ 平台适配编译边界：各平台适配器/桥接/stub（sidecar 除外）以对象文件复用并与应用链接，不再打包静态库，运行期不做动态选择。
 7. ✅ 构建脚本回归：在拆分后回归 x86 `make realtek-test`、`make netforward-test`，并在各平台流水线新增“平台无关测试”与“平台特定测试”两个步骤，完成一次 `cross-generic` 编译验证入口（`realtek-cross-generic`、`netforward-cross-generic`）。
 
+### 阶段 11：Netforward 平台适配与 sidecar 桩（待启动）
+1. 适配器实现（主进程）：
+   - 仅支持入向报文 CPU tag 提供的整机 ifindex（物理口标识，直接取 IPC 报文 `port` 字段），VLAN ID 直接取自报文 `vlanid` 字段（802.1Q，暂不考虑 802.1ad）。
+   - 发包路径不经 sidecar/IPC，直接选择 `VlanX` 命名的 VLAN 虚接口（解析 `kernel_ifindex`）发送；不插入用户态 VLAN tag。
+   - 记录与 Realtek 区别的接口选择、日志标签与默认配置项。
+2. sidecar 桩进程（仅收包）：
+   - 复用已定义的 `struct sockaddr_vlan` IPC 报文格式，模拟 hsl→主进程的报文透传；保持“只收不发”语义。
+   - 桩仅需覆盖现有固定样例输入并调用 `register_packet_rx`，暂不支持 pcap/自定义输入源。
+3. 配置与编译入口：
+   - 确认 `build/netforward/Makefile` 的 `sidecar`/`sidecar-stub` 目标满足独立产出；默认 `CROSS_PREFIX` 指向 ARM64 通用工具链，保留 `cross` 选择 `aarch64-none-linux-gnu-`。
+   - 新增/校准运行时配置项（VLANIF 前缀、缺省发包接口、日志前缀）。
+4. 测试矩阵：
+   - 平台无关单测/集成测试继续在 Netforward 入口编译并执行。
+   - 增补 Netforward 专属用例：CPU tag ifindex + vlanid 驱动的事件入队、发包接口选择、sidecar 桩透传。
+   - 在 x86 容器完成一次 `make netforward-test` 回归；预留交叉编译校验 `make netforward-cross-generic`。
+
 ## 依赖与风险
 - 依赖网络测试仪能稳定模拟大规模 ARP 终端。
 - Raw Socket 权限或平台安全策略可能禁止用户态插入 VLAN tag 或绑定虚接口，需要在部署前确认可行的发送策略。
