@@ -48,7 +48,8 @@ SIDE_CAR_OBJS := $(SIDE_CAR_SRCS:%.c=$(OBJ_DIR)/%.o)
 TEST_TARGETS := \
 	$(TEST_DIR)/terminal_discovery_tests \
 	$(TEST_DIR)/terminal_integration_tests \
-	$(TEST_DIR)/terminal_embedded_init_tests
+	$(TEST_DIR)/terminal_embedded_init_tests \
+	$(TEST_DIR)/netforward_adapter_tests
 
 TEST_C_SRCS := \
 	tests/terminal_manager_tests.c \
@@ -89,6 +90,9 @@ $(TEST_DIR)/terminal_integration_tests: $(OBJ_DIR)/tests/terminal_integration_te
 $(TEST_DIR)/terminal_embedded_init_tests: $(OBJ_DIR)/tests/terminal_embedded_init_tests.o $(OBJ_DIR)/tests/terminal_main_for_tests.o $(OBJ_DIR)/common/td_config.o $(OBJ_DIR)/common/td_logging.o | $(TEST_DIR)
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^ $(LDLIBS)
 
+$(TEST_DIR)/netforward_adapter_tests: $(OBJ_DIR)/tests/netforward_adapter_tests.o $(ADAPTER_OBJS) $(COMMON_LIB) | $(TEST_DIR)
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^ $(LDLIBS)
+
 $(OBJ_DIR)/tests/terminal_main_for_tests.o: $(SRC_DIR)/main/terminal_main.c | $(OBJ_DIR)/tests
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -DTD_DISABLE_APP_MAIN -c $< -o $@
@@ -120,3 +124,4 @@ test: $(TEST_TARGETS)
 	$(TEST_DIR)/terminal_discovery_tests
 	$(TEST_DIR)/terminal_integration_tests
 	$(TEST_DIR)/terminal_embedded_init_tests
+	$(TEST_DIR)/netforward_adapter_tests
