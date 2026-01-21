@@ -1,4 +1,4 @@
-#include "netforward_adapter_stub.h"
+#include "netforward_adapter.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -32,7 +32,7 @@ static td_adapter_result_t nf_init(const struct td_adapter_config *cfg,
     if (env) {
         adapter->env = *env;
     }
-    stub_log(adapter, TD_LOG_WARN, "netforward", "netforward adapter stub initialized; functionality not implemented");
+    stub_log(adapter, TD_LOG_WARN, "netforward", "netforward adapter placeholder initialized; functionality not implemented");
     *handle = adapter;
     return TD_ADAPTER_OK;
 }
@@ -42,12 +42,12 @@ static void nf_shutdown(td_adapter_t *handle) {
 }
 
 static td_adapter_result_t nf_start(td_adapter_t *handle) {
-    stub_log(handle, TD_LOG_INFO, "netforward", "netforward adapter stub start");
+    stub_log(handle, TD_LOG_INFO, "netforward", "netforward adapter placeholder start");
     return TD_ADAPTER_OK;
 }
 
 static void nf_stop(td_adapter_t *handle) {
-    stub_log(handle, TD_LOG_INFO, "netforward", "netforward adapter stub stop");
+    stub_log(handle, TD_LOG_INFO, "netforward", "netforward adapter placeholder stop");
 }
 
 static td_adapter_result_t nf_register_packet_rx(td_adapter_t *handle,

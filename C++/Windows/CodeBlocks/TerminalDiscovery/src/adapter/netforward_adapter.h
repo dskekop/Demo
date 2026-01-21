@@ -1,5 +1,5 @@
-#ifndef TD_NETFORWARD_ADAPTER_STUB_H
-#define TD_NETFORWARD_ADAPTER_STUB_H
+#ifndef TD_NETFORWARD_ADAPTER_H
+#define TD_NETFORWARD_ADAPTER_H
 
 #include "adapter_api.h"
 
@@ -13,4 +13,4 @@ const struct td_adapter_descriptor *td_netforward_adapter_descriptor(void);
 }
 #endif
 
-#endif /* TD_NETFORWARD_ADAPTER_STUB_H */
+#endif /* TD_NETFORWARD_ADAPTER_H */

@@ -35,7 +35,7 @@ COMMON_LIB := $(LIB_DIR)/libtd_common.a
 
 ADAPTER_SRCS := \
 	adapter/adapter_registry.c \
-	adapter/netforward_adapter_stub.c
+	adapter/netforward_adapter.c
 ADAPTER_OBJS := $(ADAPTER_SRCS:%.c=$(OBJ_DIR)/%.o)
 
 APP_SRCS := main/terminal_main.c

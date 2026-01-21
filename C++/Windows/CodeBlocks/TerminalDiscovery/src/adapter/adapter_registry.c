@@ -7,7 +7,7 @@
 #include "realtek_adapter.h"
 #endif
 #ifdef TD_ENABLE_ADAPTER_NETFORWARD
-#include "netforward_adapter_stub.h"
+#include "netforward_adapter.h"
 #endif
 
 static const struct td_adapter_descriptor *g_adapters[2];
