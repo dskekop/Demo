@@ -2,10 +2,13 @@
 
 ## 范围与关联规范
 - **目标**：依据 `specs/2025-10-31-terminal-discovery.md` 中的最新需求与约束，构建可跨平台移植的终端发现代理，首期聚焦 Realtek 平台，并确保与外部 C++ 北向接口的 ABI 兼容，同时提供面向调试与验收的只读导出接口，能实时输出终端哈希桶、接口前缀/绑定表、MAC 查表队列及相关计数器。
+- **交付/构建模式**：遵循规范新增要求，`common/`、`include/` 等平台无关代码编译为静态库供各平台复用；平台相关适配器（如 Realtek、Netforward、Linux raw socket）由各平台工程单独编译、链接，运行期不做动态选择。分拆时优先确保 Realtek 现网编译链畅通，控制迁移成本。
 - **关联规范**：`specs/2025-10-31-terminal-discovery.md`
 
 ## 假设与非目标
 - Realtek 平台具备 Raw Socket 能力并允许在物理口（如 `eth0`）直接封装 802.1Q VLAN tag 发包；若目标环境禁止用户态插入 VLAN tag，再回退到绑定 VLAN 虚接口（如 `vlan1`）。推荐交叉编译前缀为 `mips-rtl83xx-linux-`（如 `mips-rtl83xx-linux-gcc`）；若该工具链暂不可用，可使用通用 MIPS 交叉工具链验证代码可编译性。
+- Netforward 平台报文自带 CPU tag，可直接提供整机 ifindex；无需 MAC 查表，也不依赖 `libswitchapp.so`；收发由 sidecar 进程与平台 hsl 通信后透传给主进程。需在本项目内提供 sidecar 打桩实现以便无 hsl 环境的集成验证。
+- Realtek 平台进程、Netforward 平台进程与 sidecar 进程相互独立运行；跨平台可复用部分仅限静态库形式的公共代码（`libtd_common.a`），各平台适配器以对象方式链接到各自进程，运行期不做动态切换。
 - 终端发现逻辑仅依赖入方向 ARP 报文；适配器需在收包侧过滤掉本机发送的 ARP，避免无意义事件，并在内核剥离 VLAN tag 时通过 `PACKET_AUXDATA` 取回原始 VLAN。
 - 设备启动阶段已默认为所有二层口启用 ARP Copy-to-CPU ACL，适配器无需额外校验或感知该配置。
 - 设备上存在网络测试仪或等效工具，可模拟 ≥300 个终端。
@@ -16,6 +19,7 @@
 - 当前回调/查询要求输出 `mac`、`ip`、`ifindex` 与变更标签四个字段，并以字符串/整型形式携带；未来扩展将另行评估，回调在初始化阶段注册后保持实时推送。
 - 开发环境为 x86，而目标 Realtek 平台为 MIPS；与硬件相关的测试需在目标平台上手动运行与验证。
 - 不在本轮实现 CLI/UI、DHCP/ND 嗅探或与 FIB 的深度集成。
+- 平台适配仅在构建期选择单一适配器；运行期不切换。公共静态库与平台专有适配器需保持编译解耦，拆分过程中 Realtek 平台的编译/链接路径必须优先验证，避免现网被阻断。
 
 ## 分阶段计划
 
@@ -70,7 +74,7 @@
 
 ### 阶段 3：报文解码与事件上报（已完成）
 1. ✅ 报文解析：
-   - `terminal_manager_on_packet` 在持锁前采集快照，刷新 VLAN/接口元数据并据此触发状态切换；若暂未解析到 ifindex 时回退到 VLAN 模板或选择器结果，保证事件仍能携带有效上下文。针对免费 ARP（sender IP 为空或 0.0.0.0）的情况，明确改用报文 `target IP` 更新终端 IPv4 地址，禁止继续记录无意义的 0.0.0.0；sender/target 同为 0.0.0.0 的报文视为异常并直接丢弃。
+   - `terminal_manager_on_packet` 在持锁前采集快照，刷新 VLAN/接口元数据并据此触发状态切换；若暂未解析到 ifindex 时回退到 VLAN 模板或选择器结果，保证事件仍能携带有效上下文。针对免费 ARP（sender IP 为空或 0.0.0.0）的情况，明确改用报文 `target IP` 更新终端 IPv4 地址，禁止继续记录无意义的 0.0.0.0；sender/target 同为 0.0.0.0 的报文视为异常并直接丢弃。检测到源 MAC 非单播（组播/广播源）时同样判定为异常并丢弃、输出 WARN；理由是以太网规范要求源地址为单播，设备通常不学习这类源 MAC，继续处理会导致终端表污染、端口漂移误判或容量被恶意 MAC 消耗。
    - Realtek 平台结合 MAC 表缓存刷新 `terminal_metadata.ifindex`，若缓存命中失败则触发桥接 API 重拉，确保事件与北向查询对齐整机 ifindex。
    - 依赖 ACL 提供的 VLAN tag 判定终端归属；若地址表查不到对应前缀或无法再构造有效 ARP（例如 VLANIF 被移除 IPv4 或迁移网段），即转入 `IFACE_INVALID`，后续在地址恢复或报文再次到达时重新探测。
    - 当 VLANIF 重新获得有效 IPv4 时，事件队列需及时触发一次 `IFACE_INVALID → PROBING` 的状态变更（或 `MOD`/`ADD` 视上下文而定），并补充相应结构化日志，保证北向能够感知恢复并在下一轮保活重新探测。
@@ -109,6 +113,7 @@
    - ✅ IPv4 恢复覆盖：新增集成测试模拟 VLANIF IPv4 删除与恢复，确认条目回迁、`tx_kernel_ifindex/tx_source_ip` 重建、状态推进与事件/日志输出均符合规范。
 5. ⏳ 实机/压力验证：
    - 300 终端 Realtek Demo 回归；1k 终端压力测试记录 CPU/内存/丢包。
+   - 新增“异常源 MAC”桩/集成用例：构造组播/广播源 MAC 的 ARP，验证管理器记录 WARN、丢弃报文、不创建终端/事件/统计。
 6. ⏳ 验收输出：整理测试报告、回滚策略、性能曲线。
 
 ### 阶段 6：守护进程初始化入口（已完成）
@@ -139,6 +144,22 @@
 5. ✅ 测试补充：已扩展单元测试覆盖点查命中/未命中与 VLAN 切换 `MOD` 事件，并通过 `make test` 验证通过；后续若需 demo/stub 断言可在回归阶段追加。
 6. ✅ 文档同步：已更新规范与设计文档引用（demo 指南、适配器说明、调试手册），标注点查接口调用顺序与回退路径，并说明点查不返回版本号时由管理器写回当前版本的处理方式。
 
+### 阶段 10：构建与目录拆分（进行中）
+1. ✅ 顶层分发器 + 子目录 Makefile：当前仅拆分 Realtek、Netforward 两个平台入口（对等命名的 `make realtek`、`make netforward`），跳转到对应子目录的独立 makefile；各平台 makefile 负责主进程（以及仅 Netforward 的 sidecar）与 `libtd_common.a` 的生成/清理，不暴露“仅编库”目标，并将对象/产物输出到私有目录（如 `out/<platform>/`）避免冲突。
+2. ✅ 平台白名单与 sidecar 目标：Realtek/Netforward 各自 makefile 采用白名单列出自身源文件，禁止跨平台引用；Realtek-only 源（`stub/td_switch_mac_stub.c`、`demo/td_switch_mac_demo.c`、`src/ref/realtek/*` 及依赖 Realtek SDK 头的文件）仅在 Realtek 构建入口参与，Netforward 排除。Netforward makefile 提供独立 `sidecar`/`sidecar-stub` 目标，sidecar 产出独立二进制，支持变量切换真实 IPC 对象或 stub。
+3. ✅ 测试矩阵梳理：平台无关测试标记为各平台必编必跑；平台相关测试仅在对应平台 makefile 中构建/执行，并保持输出目录隔离以便流水线并行（已在 x86 下通过 `make realtek-test`、`make netforward-test` 回归）。
+4. ✅ cross-generic 支撑：各平台 makefile 增设 `CROSS_PREFIX`/`cross-generic` 目标，使用通用交叉工具链完成一次编译验证并记录结果；默认通用前缀为 Realtek/MIPS `mips-linux-gnu-`，Netforward/ARM64 `aarch64-linux-gnu-`。厂商专有前缀（如 `mips-rtl83xx-linux-`/`aarch64-none-linux-gnu-`）仅在可用时供 `cross` 目标选择性使用，不作为默认或必备。
+5. ✅ 公共代码静态库化：`libtd_common.a` 汇总 `common/` 与北向 C++ 代码，默认随平台构建产生并在各平台 makefile 内负责清理。
+6. ✅ 平台适配编译边界：各平台适配器/桥接/stub（sidecar 除外）以对象文件复用并与应用链接，不再打包静态库，运行期不做动态选择。
+7. ✅ 构建脚本回归：在拆分后回归 x86 `make realtek-test`、`make netforward-test`，并在各平台流水线新增“平台无关测试”与“平台特定测试”两个步骤，完成一次 `cross-generic` 编译验证入口（`realtek-cross-generic`、`netforward-cross-generic`）。
+
+### 阶段 11：Netforward 平台实现（新增）
+1. ⏳ 适配器与收包通路：按规范完成 `netforward_adapter`，使用 Unix 域可靠流式 IPC 接收 `struct sockaddr_vlan + frame`，解析 `port` 为整机 ifindex、`vlanid` 为 VLAN，并在接入层直接驱动 `register_packet_rx`；路径全程不依赖 MAC 定位或 Realtek 桥接。
+2. ⏳ sidecar（stub 版）首期落地：当前阶段仅交付 sidecar-stub，自发/回放 ARP 完成验收，复用与 hsl 对接相同的 IPC 头部与“先 peek 头再读帧”的读写协议，为后续切换真实 sidecar/hsl 保留兼容性。
+3. ⏳ 发包通路：netforward 发送沿 VLAN 虚接口（前缀 `Vlan`，如 `Vlan1`）直出，不经 sidecar/IPC；补齐接口解析/命名配置、节流与 ignored_vlans 过滤，保持与收包 VLAN 一致。
+4. ⏳ 构建与目标：完善 `make netforward`/`make sidecar-stub` 规则，输出至独立目录，默认使用 `aarch64-linux-gnu-` 进行 `netforward-cross-generic` 交叉验证；若后续引入真实 sidecar，再追加对应目标（非本阶段必需）。
+5. ⏳ 测试与验收：在 x86 stub 场景补充单元/集成测试覆盖头+帧封装、逐报文读取、长度一致性、ignored_vlans、免费 ARP/异常源 MAC 丢弃；规划 ARM64 目标环境一次自发报文演练，并在未来接入 hsl 时回归 IPC 兼容性。
+6. ⏳ 观测与日志：对齐通用结构化日志标签，侧重报文长度/头部校验、IPC 连接状态与丢帧计数；在 sidecar-stub 提供可控流量开关与速率配置，便于压力与一致性测试。
 
 ## 依赖与风险
 - 依赖网络测试仪能稳定模拟大规模 ARP 终端。

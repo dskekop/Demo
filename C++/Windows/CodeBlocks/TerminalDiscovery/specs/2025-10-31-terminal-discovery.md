@@ -13,6 +13,22 @@
 - 在 ARM64、MIPS、x86 等不同 CPU 体系和报文收发架构间保持可移植性，并在 Realtek 平台率先完成 300 终端 Demo 验证。
 - 提供可嵌入外部守护进程的初始化入口，满足多平台统一集成和生命周期托管。
 
+## 交付与运行模式
+- 公共逻辑（`common/`、`include/`）以 `libtd_common.a` 交付，平台主进程仅链接该跨平台静态库；Realtek/Netforward 主进程彼此独立运行。sidecar 仅在 Netforward 平台存在，位于 `stub/`，为独立进程且不依赖该静态库；其他平台（含 Realtek/Linux raw socket 等）不引入 sidecar。
+- 平台适配器（Realtek、Netforward、Linux raw socket 等）在各自工程内单独编译成对象文件并与宿主进程/固件链接发布，运行时仅携带本平台适配器，不做动态切换或并行装载。
+- 构建隔离：各平台保持独立编译入口/目标（含 sidecar），只依赖 `libtd_common.a` 与公共头；构建任一平台不检查其他平台的工具链或适配器对象，禁止单二进制条件编译多适配器。
+- 运行时配置仅覆盖当前已编译进进程的适配器参数（接口名、发包节流、VLAN 过滤等），无法通过配置启用其他平台适配器。
+- `src/` 目录物理分离平台无关/有关代码：公共代码编译成静态库，平台代码在各自工程内编译并与静态库解耦，便于增量集成新平台。
+- Realtek 先行落地：优先打通静态库与 Realtek 适配层的编译链，保持现有编译选项与桥接依赖可用，再渐进推广到其他平台，避免一次性拆分阻断现网集成。
+ - 构建与测试布局：
+   - 顶层 Makefile 仅作分发器，提供 `make realtek`、`make netforward`、`make linux` 等对等命名的入口跳转至对应子目录，不再用单一 Makefile 携带全部平台规则；各平台目标命名需对等、对齐，避免出现默认/主平台的特殊命名（如 `all` 只代表某一平台）。
+    - 每个平台拥有独立的 makefile 入口，负责本平台主进程与（仅 Netforward）sidecar 的编译、静态库的生成/清理（不单独暴露“仅编库”目标），并将对象文件与产物存放在平台私有输出目录（如 `out/<platform>/`），避免同名目标冲突。
+    - 公共静态库仍为 `libtd_common.a`，由各平台 makefile 复用并在各自流程内生成/清理；平台适配器/sidecar 源文件以“白名单”方式写入各自 makefile，禁止跨平台引用。
+    - Realtek 专属实现（除适配器外）仅在 Realtek 平台构建：`stub/td_switch_mac_stub.c`（覆盖 Realtek MAC 桥接弱符号）、`demo/td_switch_mac_demo.c`（桥接示例）、`src/ref/realtek/*`（仅作参考）与其他依赖 Realtek SDK/桥接头文件的源文件不得在 Netforward/Linux raw socket 等平台的构建入口中被包含，避免因缺失 SDK 依赖导致编译失败；非 Realtek 平台仅链接 `libtd_common.a` 与各自的适配器/sidecar 对象。
+    - Netforward 平台在 makefile 中提供 sidecar 专用目标（如 `sidecar`、`sidecar-stub`），主进程与 sidecar 分别产出独立二进制，允许通过变量切换真实 IPC 对象或 stub。
+    - 测试程序按平台无关性划分：平台无关测试需在所有平台 makefile 中构建；平台相关测试仅在对应平台 makefile 中构建与执行。
+      - 各平台 makefile 需支持 `CROSS_PREFIX`/`cross-generic` 目标，使用通用交叉工具链（如 `mips-linux-gnu-`、`aarch64-linux-gnu-` 前缀）完成编译，以验证嵌入式环境的可行性并保持与现网平台一致；`cross` 目标仅供厂商特定工具链（如 `mips-rtl83xx-linux-`）存在时选择性使用，默认交叉验证依赖 `cross-generic`，不得将厂商专有工具链设为必备。
+
 ## 非目标
 - 本阶段不实现完整的 DHCP/ND 嗅探能力。
 - 不管理三层路由逻辑，也不直接操控 FIB/ARP 表，除非与终端跟踪相关。
@@ -24,14 +40,14 @@
 3. **接口感知**：仅依赖 IPv4 地址增删和 `if_nametoindex` 可解析性来判断三层 VLAN 接口是否可用，无需额外监听 VLAN 接口的创建/删除事件；接口无效时暂停保活。
 4. **Access/Trunk 逻辑**：当前平台 ACL 已保证送达内核的报文携带真实 VLAN tag，且该 VLAN 必然已在本机存在；因此无需额外查询 Access/Trunk 配置数据，仅依据报文内 VLAN 决定终端归属。仍需在缺失对应 VLANIF 时按三层 Down 逻辑处理。
 5. **拓扑边界场景**：当关联的三层接口暂不可用（无法解析 `if_nametoindex`、缺少可匹配 IPv4、出现跨网段 ARP）时保留 30 分钟，期间不发送保活；恢复后转入探测态。
-6. **平台适配**：为不同平台提供独立适配器实现，部署时按平台选择单个适配器运行（不在同一进程内并行多个适配器）。
+6. **平台适配**：为不同平台提供独立适配器实现；公共库被各平台工程复用，平台专有适配器在各自工程内单独编译并随宿主固件发布，运行期不支持动态选择或并行装载其他平台的适配器，避免交叉依赖导致的编译/链接失败。
 7. **事件上报**：
    - 提供实时增量变更通知，注册回调后立即推送发现的终端变化。
    - 支持查询当前终端表的全量快照，并确保增量上报状态与查询快照一致。
    - 当终端因端口变更触发 `MOD` 事件时，增量载荷需同时携带新旧 ifindex；此处指的是面向北向的逻辑接口标识（即 `terminal_metadata.ifindex`，与 `TerminalInfo::ifindex` 对齐），而非内部用于发送保活的 `tx_kernel_ifindex`。其余事件类型旧端口值填 0 作为占位，便于北向通用处理。
 8. **可配置项**：
    - 可配置终端保活周期、最大终端数量（200、300、500、1000 等档位）。
-   - 启动时按配置选择唯一的平台适配器；为该适配器定义必要的端口/VLAN 过滤参数。
+   - 仅针对当前已编译进进程的唯一平台适配器提供运行时参数（接口名、发包节流、VLAN 过滤等）；适配器类型在构建期确定，运行期不可切换。
    - 允许通过运行配置或 CLI 指定 `ignored_vlans` 列表，在收包路径上忽略特定 VLAN 的 ARP 报文，默认列表为空。
 9. **守护进程集成**：
    - 在 `src/main/terminal_main.c` 提供一个默认不被自动调用的初始化函数，供外部守护进程在自身生命周期内显式触发启动；模块自进程启动后常驻，除非宿主进程退出不会主动关闭。
@@ -121,6 +137,34 @@
       - 缓存正在刷新、强制刷新失败或尚未初始化时返回 `TD_ADAPTER_ERR_NOT_READY`，终端管理器据此保持队列等待下一轮版本更新；
       - 缓存可用但未命中目标 MAC/VLAN 时返回 `TD_ADAPTER_ERR_NOT_FOUND`，同时输出 `ifindex=0` 并保留当前版本号，禁止使用 `NOT_READY` 触发重复刷新；
       - 相关语义需在 `realtek_mac_locator_lookup` 与后续桥接实现中保持一致，确保 `mac_need_refresh` 队列不会因错误码混用而无限膨胀。
+- **Netforward 参考约束与流程**：
+   - sidecar 由来：与 hsl 进程间通信收包需要引入平台特定的进程框架，为避免污染/耦合集成本项目的主进程，采用 cloud-native sidecar 模式：sidecar 引入平台框架并完成与 hsl 的通信，再将报文透传给主进程。
+   - 现阶段 sidecar 可不接入 hsl，默认以 stub/自发模拟报文完成终端发现链路验收；但需保持与 hsl 对接的兼容性（沿用相同 IPC 头部与收包流程），便于后续无缝切换为真实 hsl 数据源。
+   - 收包链路：参考 `src/ref/netforward`，通过与用户态核心转发进程 hsl 的 IPC 收包，不再使用 Raw Socket。sidecar 负责接入平台框架并与 hsl 通信，将报文透传给主进程；主进程在适配器内解析后喂给已注册的 `register_packet_rx` 回调。提供 sidecar 打桩以便无 hsl 环境下验收。
+   - 元数据解析：报文自带 CPU tag，`port` 字段即整机 ifindex（物理口），无需 `td_adapter_mac_locator_ops`。VLAN 取自 `vlanid` 字段；整机 ifindex 与 VLANIF 的 `kernel_ifindex` 语义独立，不混用。
+   - 发包路径：主进程直接在对应 VLAN 虚接口（前缀 `Vlan`，如 `Vlan1`）发送，不经过 IPC/sidecar，也不使用“全局” `eth0`。平台不依赖且不提供 `libswitchapp.so`。
+   - IPC 报文格式（sidecar↔hsl）：地址头为 `struct sockaddr_vlan`，后随完整以太网帧。
+
+```
+struct sockaddr_vlan {
+   unsigned char dest_mac[HSL_ETHER_ALEN];
+   unsigned char src_mac[HSL_ETHER_ALEN];
+   unsigned int port;        /* Outgoing/Incoming interface index */
+   unsigned short vlanid;    /* Vlan id */
+   unsigned short svlanid;   /* SVlan id */
+   unsigned int length;      /* Length of the Packet */
+   unsigned short eth_type;  /* Ethernet type */
+};
+
+#define HSL_ETHER_ALEN 6
+```
+
+    sidecar 仅做透传，不修改报文；适配器负责将 `port`/`vlanid` 整理为平台无关层可用的 VLAN 和整机 ifindex。
+   - 参考收包链路（便于 sidecar 模拟）：参考代码中通过 `message_client` 异步连接 HSL（Unix 域 `HSL_ASYNC_PATH` 或 TCP `HSL_ASYNC_PORT`），epoll 激活后进入“先 peek 头、再按长度读全帧”的流程：先用 `MSG_PEEK` 读取 `struct sockaddr_vlan` 拿到 `length`，再按该长度读完完整报文，拷贝头部后将余下以太帧交给平台解析。sidecar stub 需保持同一封装（头部 + 完整二层帧）以复用解析逻辑。
+   - sidecar 与主进程（netforward 适配器）间的报文透传统一使用 Unix 域可靠流式 IPC，保证头部与帧数据的字节序、完整性与有序性，并与参考代码的 epoll/peek 读法天然对齐；本地同机场景无需退化到 UDP 或无序报文模式。
+   - sidecar模拟补充：参考代码的收包回调按报文粒度触发，每次 epoll 可读只消费一个完整报文（`struct sockaddr_vlan` 头 + 长度为 `length` 的以太帧），不会合并多帧或拆分半帧；`length` 表示纯以太网帧长度（不含 `struct sockaddr_vlan`），sidecar/hsl 应保证 `length` 与后续帧字节数一致。stub 发送时需先写完整头，再紧跟帧内容，避免出现短读或多帧黏连导致解析偏移。
+   - 运行步骤：sidecar stub 模拟 hsl IPC→适配器解析 VLAN/CPU tag→`register_packet_rx` 驱动终端发现；上行发包沿 VLANIF 直出。
+   - 构建提示：直接使用通用 ARM64 交叉工具链（如 `aarch64-linux-gnu-`），无需依赖 `aarch64-none-linux-gnu-`。
 - **北向 API 约束**：
    - 本项目提供 `getAllTerminalInfo` 与 `setIncrementReport` 的 C 导出实现，对外暴露为稳定 ABI；外部团队实现 `IncReportCb` 并承诺在被调用时不阻塞。
     - 需兼容外部团队既定的 C++ 类型定义：
@@ -162,7 +206,7 @@
    6. 地址表与反向索引的读写均在持有 `terminal_manager.lock` 时进行；外部事件处理（Netlink 回调）进入核心引擎后需先获取此锁，保证与 `resolve_tx_interface`、终端状态机操作不存在竞态。为降低更新阻塞，可在锁内完成结构更新后再脱锁触发终端状态变更/事件队列。
 - **报文路径**：
     1. 适配器仅上报入方向的 ARP 帧及其元数据（MAC、VLAN、入接口、时间戳）给发现引擎；若内核因 RX VLAN offload 剥离 802.1Q 头，必须启用 `PACKET_AUXDATA` 并从 `tpacket_auxdata` 读取原始 VLAN ID；本机发送的 ARP 在适配层即被忽略。
-   2. 引擎归一化 VLAN/接口上下文，更新或创建 `terminal_entry` 状态，并入队变更事件；Realtek 平台默认收包不携带 CPU tag。处理免费 ARP（sender IP 为 0.0.0.0 或缺省）的场景时，以报文中的 target IP 作为终端 IPv4 地址来源，禁止继续记录 0.0.0.0 作为终端地址；sender/target 同时为 0.0.0.0 的异常报文应直接丢弃并写日志。
+   2. 引擎归一化 VLAN/接口上下文，更新或创建 `terminal_entry` 状态，并入队变更事件；Realtek 平台默认收包不携带 CPU tag。处理免费 ARP（sender IP 为 0.0.0.0 或缺省）的场景时，以报文中的 target IP 作为终端 IPv4 地址来源，禁止继续记录 0.0.0.0 作为终端地址；sender/target 同时为 0.0.0.0 的异常报文应直接丢弃并写日志。若检测到源 MAC 非单播（例如刻意构造的组播或广播源 MAC），同样视为异常报文，直接丢弃且记录 WARN，不创建终端条目、事件或统计；原因是以太网规范要求源 MAC 必须为单播，设备通常不会学习组播/广播源地址，继续处理会导致终端表污染、端口漂移误判或被伪造 MAC 消耗容量。
    3. 若收包 VLAN 命中 `ignored_vlans` 列表，则记录 DEBUG 级日志后立即返回，不创建或更新终端条目、统计或 MAC 查表任务。
    4. 若收包 VLAN 在当前地址表中找不到对应 VLANIF（例如尚未创建该 VLAN 的虚接口），仍需保留该终端条目以便后续查询与事件溯源，但状态必须立即标记为 `IFACE_INVALID`，并跳过保活/探测；此时默认没有可用的 `kernel_ifindex` 与 `tx_source_ip`，需保持终端处于待恢复状态。同时输出结构化日志提示“VLAN 无可用虚接口”。当后续创建或恢复该 VLANIF 并补齐 IPv4 后，终端应按照接口管理章节定义的恢复流程自动转入 `PROBING/ACTIVE`，无需重新收包。若之后运维将终端从原 VLAN 端口拔除并接入另一 VLAN 的二层口，引擎需在下一次收到该 MAC 的报文时立即刷新条目的 VLAN/端口元数据：
       - 若新 VLAN 已存在可用 VLANIF，则重新绑定 `tx_source_ip/kernel_ifindex`，将状态推进为 `PROBING` 并触发一次携带新旧 ifindex 的 `MOD` 事件；

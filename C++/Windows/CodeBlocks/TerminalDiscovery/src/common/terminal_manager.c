@@ -1886,6 +1886,25 @@ void terminal_manager_on_packet(struct terminal_manager *mgr,
     struct terminal_key key;
     memcpy(key.mac, arp->arp_sha, ETH_ALEN);
 
+    if ((key.mac[0] & 0x01) != 0) {
+        char mac_buf[18];
+        snprintf(mac_buf,
+                 sizeof(mac_buf),
+                 "%02x:%02x:%02x:%02x:%02x:%02x",
+                 key.mac[0],
+                 key.mac[1],
+                 key.mac[2],
+                 key.mac[3],
+                 key.mac[4],
+                 key.mac[5]);
+        td_log_writef(TD_LOG_DEBUG,
+                      "terminal_manager",
+                      "drop arp with non-unicast source mac=%s vlan=%d",
+                      mac_buf,
+                      packet->vlan_id);
+        return;
+    }
+
     struct in_addr sender_ip;
     struct in_addr target_ip;
     memcpy(&sender_ip.s_addr, arp->arp_spa, sizeof(sender_ip.s_addr));
